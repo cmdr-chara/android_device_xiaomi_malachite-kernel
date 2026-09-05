@@ -30,6 +30,56 @@ def span(data: bytes, offset: int, size: int) -> bytes:
     return data[offset:offset + size]
 
 
+def device_tree_container(data: bytes) -> dict:
+    """Check raw FDT or Android DT-table v0 bounds, not tree semantics.
+
+    Layout: platform/system/libufdt utils/src/dt_table.h. No payload scan or
+    guessed offset is used. Compressed/newer table versions need their own
+    parser and must not silently pass this v0-only inspection.
+    """
+    def fdt(offset: int, available: int) -> dict:
+        header = span(data, offset, 40)
+        magic, total = struct.unpack_from('>II', header)
+        if magic != 0xd00dfeed or total < 40 or total > available:
+            raise ValueError('Invalid FDT header or size')
+        span(data, offset, total)
+        return {'offset': offset, 'size': total}
+
+    if len(data) < 4:
+        raise ValueError('Truncated device-tree container')
+    magic = struct.unpack_from('>I', data)[0]
+    if magic == 0xd00dfeed:
+        return {'format': 'raw-fdt', 'entries': [fdt(0, len(data))]}
+    if magic != 0xd7b7ab1e:
+        raise ValueError('Unrecognized device-tree container magic')
+    _, total, header_size, entry_size, count, entries_offset, page_size, version = (
+        struct.unpack('>8I', span(data, 0, 32)))
+    if version != 0:
+        raise ValueError(f'Unsupported DT-table version {version}; only v0 is inspected')
+    if total > len(data) or total < 32 or header_size < 32 or header_size > total:
+        raise ValueError('Invalid DT-table total/header size')
+    if entry_size < 32 or not count or entries_offset < header_size:
+        raise ValueError('Invalid DT-table entry layout')
+    entries_end = entries_offset + count * entry_size
+    if entries_end > total:
+        raise ValueError('DT-table entries extend outside container')
+    entries = []
+    ranges = []
+    for index in range(count):
+        fields = struct.unpack('>8I', span(data, entries_offset + index * entry_size, 32))
+        size, offset = fields[:2]
+        if offset < entries_end or size > total or offset > total - size:
+            raise ValueError('DT-table payload overlaps header or exceeds container')
+        item = fdt(offset, size)
+        item.update({'id': fields[2], 'revision': fields[3], 'custom': list(fields[4:])})
+        entries.append(item)
+        ranges.append((offset, offset + size))
+    ordered = sorted(ranges)
+    if any(left[1] > right[0] for left, right in zip(ordered, ordered[1:])):
+        raise ValueError('DT-table payloads overlap')
+    return {'format': 'android-dt-table-v0', 'page_size': page_size, 'entries': entries}
+
+
 def modinfo(data: bytes) -> dict[str, list[str]]:
     if len(data) < 64 or data[:7] != b'\x7fELF\x02\x01\x01':
         raise ValueError('Expected ELF64 little-endian module')
@@ -136,14 +186,10 @@ def inspect(root: Path) -> dict:
     for path in dtbs:
         try:
             regular_file(root, path)
-            with path.open('rb') as stream:
-                header = stream.read(8)
-            if len(header) != 8 or struct.unpack('>I', header[:4])[0] != 0xd00dfeed:
-                raise ValueError(f'Invalid DTB header: {path.name}')
-            total = struct.unpack('>I', header[4:])[0]
-            if total < 40 or total > path.stat().st_size:
-                raise ValueError(f'Invalid DTB size: {path.name}')
-            record(path)
+            if path.stat().st_size > MAX_MODULE_BYTES:
+                raise ValueError(f'Device-tree container exceeds inspection limit: {path.name}')
+            metadata = device_tree_container(path.read_bytes())
+            record(path)['device_tree_container'] = metadata
         except (OSError, ValueError) as error:
             report['errors'].append(str(error))
     if (root / 'dtbo.img').exists() or (root / 'dtbo.img').is_symlink():

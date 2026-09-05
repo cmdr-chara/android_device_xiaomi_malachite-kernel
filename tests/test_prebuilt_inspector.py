@@ -61,6 +61,44 @@ class InspectorTests(unittest.TestCase):
         for text in ('', '../test.ko', '/test.ko', 'a.ko b.ko', '.ko'):
             with self.subTest(text=text), self.assertRaises(ValueError): inspector.load_names(text)
 
+    def dt_table(self):
+        fdt = struct.pack('>II', 0xd00dfeed, 40) + bytes(32)
+        return bytearray(struct.pack('>8I', 0xd7b7ab1e, 104, 32, 32, 1, 32, 2048, 0)
+                         + struct.pack('>8I', 40, 64, 0, 0, 0, 0, 0, 0) + fdt)
+
+    def test_android_dt_table_v0(self):
+        result = inspector.device_tree_container(self.dt_table())
+        self.assertEqual(result['format'], 'android-dt-table-v0')
+        self.assertEqual(result['entries'][0]['offset'], 64)
+
+    def test_dt_table_rejects_header_overlap(self):
+        data = self.dt_table(); struct.pack_into('>I', data, 36, 32)
+        with self.assertRaises(ValueError): inspector.device_tree_container(data)
+
+    def test_dt_table_rejects_payload_outside_declared_total(self):
+        data = self.dt_table(); struct.pack_into('>I', data, 4, 100)
+        with self.assertRaises(ValueError): inspector.device_tree_container(data)
+
+    def test_dt_table_rejects_entry_array_outside_container(self):
+        data = self.dt_table(); struct.pack_into('>I', data, 16, 100)
+        with self.assertRaises(ValueError): inspector.device_tree_container(data)
+
+    def test_dt_table_does_not_guess_newer_or_compressed_versions(self):
+        data = self.dt_table(); struct.pack_into('>I', data, 28, 1)
+        with self.assertRaises(ValueError): inspector.device_tree_container(data)
+
+    def test_dt_table_rejects_truncated_or_invalid_fdt(self):
+        for data in (self.dt_table()[:70], self.dt_table()[:64] + bytes(40)):
+            with self.assertRaises(ValueError): inspector.device_tree_container(data)
+
+    def test_inspects_wrapped_dtb_without_rewriting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); self.fixture(root)
+            path = root / 'dtb/mt6878.dtb'; data = self.dt_table(); path.write_bytes(data)
+            result = inspector.inspect(root)
+            self.assertEqual(result['status'], 'PASS', result['errors'])
+            self.assertEqual(path.read_bytes(), data)
+
     def fixture(self, root):
         (root / 'Image.lz4').write_bytes(bytes.fromhex('02214c18') + b'fixture')
         (root / 'dtb').mkdir()
