@@ -1,0 +1,36 @@
+name: Prebuilt artifact contracts (read-only)
+
+on:
+  push:
+    branches: [revival/prebuilt-contracts]
+  pull_request:
+    branches: [lineage-23.2]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Inspector regression tests
+        run: python3 -m unittest discover -s tests -p 'test_prebuilt_inspector.py' -v
+      - name: Inspect the actual checked-in artifacts without executing them
+        run: |
+          git rev-parse HEAD > candidate.txt
+          python3 tools/inspect_prebuilts.py > prebuilt-evidence.json
+          git diff --exit-code -- Image.lz4 dtb dtbo.img 'modules.load.*' system_dlkm vendor_dlkm vendor_ramdisk
+      - name: Preserve metadata only, including failed inspection
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: prebuilt-evidence-${{ github.sha }}
+          path: |
+            candidate.txt
+            prebuilt-evidence.json
+          if-no-files-found: error
+          retention-days: 7
