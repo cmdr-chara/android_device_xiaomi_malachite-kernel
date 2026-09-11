@@ -1,3 +1,5 @@
+# KernelSU-Next LKM first: root manager must be live before userspace starts.
+kernelsu.ko
 haptic.ko
 si_haptic.ko
 cfg80211.ko
